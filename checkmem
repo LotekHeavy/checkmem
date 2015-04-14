@@ -1,0 +1,118 @@
+#!/bin/env python2.7
+# -*- coding: iso-8859-1 -*-
+"""
+    checkmem - Check memory usage on different user accounts and restart the process,
+    works for my webfaction shared hosting account.
+
+    Dependencies:
+    * Python 2.7
+    * Paramiko SSH Library (http://www.paramiko.org/)
+
+    Usage:
+    * checkmem >> </path/to/logfile.log>
+
+    Configuration:
+    * checkmem
+        -> domain, applications
+    * on every server (user account):
+        -> a start, stop and restart script; under /home/<username>/bin/<script>
+
+    @copyright: 20015 by Marcel Haefner (mail@heavy.ch)
+    @license: GNU GPL
+"""
+
+import paramiko
+import sys
+import select
+import datetime
+
+
+def sendssh(host, username, command):
+    output = None
+
+    # Connection
+    # print "Trying to connect to %s..." % host
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(hostname=host, username=username)
+        # print "Connected to %s" % host
+    except paramiko.AuthenticationException:
+        print "Authentication failed when connecting to %s" % host
+        sys.exit(1)
+    except:
+        print "Could not SSH to %s" % host
+        sys.exit(1)
+    # Command
+    stdin, stdout, stderr = ssh.exec_command(command)
+
+    # Wait for the command to terminate
+    while not stdout.channel.exit_status_ready():
+        # Only print data if there is data to read in the channel
+        if stdout.channel.recv_ready():
+            rl, wl, xl = select.select([stdout.channel], [], [], 0.0)
+            if len(rl) > 0:
+                # Print data from stdout
+                output = stdout.channel.recv(1024),
+    return output
+
+
+def main():
+    # Default Values
+    domain = "heavy.ch"
+    applications = {'lotekcalibre': 150, 'lotekapache': 250, 'lotekuwsgi': 600}
+
+    # Initial Variables
+    now = datetime.datetime.now()
+    mem = {}
+    restart = False
+
+    # Get memory for every username
+    print "%s:" % (now.strftime("%d.%m.%Y - %H:%M:%S")),
+    for user, memory in applications.iteritems():
+        print "%s" % user,
+        raw = sendssh(domain,
+                      user,
+                      "ps -o rss,command -u %s | grep -v peruser | awk '{sum += $1} END {print sum / 1024}'" % user)
+        try:
+            memory = raw[0].rstrip()
+            mem[user] = memory
+        except TypeError:
+            # sometimes we receive a empty/invalid value (None)
+            memory = 0
+            mem[user] = 0
+    print "... done."
+
+    for user, memory in mem.iteritems():
+        print " - %s: %dMB (%dMB)" % (user, int(float(memory)), applications[user])
+
+        # Zero memory means error, the ps process needs at least 1.5MB
+        if memory == 0:
+            print "    No memory/process data..."
+            continue
+
+        # no memory used (as long as a process uses 5mb - its running)
+        if float(memory) < 5:
+            print "    Process not running! %s is using only %dMB." % (user, float(memory), )
+            print "    Init restart: ",
+            print sendssh(domain, user, "/home/%s/bin/restart" % user)
+            restart = True
+            continue
+
+        # too much memory
+        if float(memory) > float(applications[user]):
+            print "    Too much memory! From %dMB allowed %s is using %dMB." % (
+                float(applications[user]), user, float(memory), )
+            print "    Init restart: ",
+            print sendssh(domain, user, "/home/%s/bin/restart" % user)
+            restart = True
+            continue
+
+    # if we did a process restart, we exit with an error (1)
+    if restart:
+        exit(1)
+
+
+if __name__ == '__main__':
+    main()
+
